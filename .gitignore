@@ -1,0 +1,22 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.env.*
+.pytest_cache/
+.mypy_cache/
+.cache/
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+# Logs/DB
+*.log
+*.sqlite
+*.db
+# Playwright
+playwright/.cache/
+
+!.env.example
