@@ -4,10 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Оплата Stars — TON</title>
-  <!-- TonConnect UI (с модалкой выбора кошелька) -->
+
+  <!-- TonConnect UI с модалкой кошельков -->
   <script src="https://unpkg.com/@tonconnect/ui@latest/dist/tonconnect-ui.min.js"></script>
-  <!-- Telegram WebApp SDK (не обязателен, но ок) -->
+  <!-- Telegram WebApp SDK (по желанию) -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- ton-core для сборки payload (BOC) с комментарием -->
+  <script src="https://unpkg.com/ton-core@0.56.3/dist/ton-core.umd.min.js"></script>
+
   <style>
     html,body{margin:0;padding:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",sans-serif;background:#0b0f19;color:#fff}
     .wrap{max-width:740px;margin:0 auto;padding:28px}
@@ -21,7 +25,6 @@
     .muted{opacity:.9}
     .ok{color:#9effb4}
     .err{color:#ff8c8c}
-    .kbd{display:inline-block;padding:.15rem .45rem;border:1px solid #2b3a63;border-radius:6px;background:#0d1426}
   </style>
 </head>
 <body>
@@ -37,7 +40,7 @@
     <div class="row">Сумма к оплате: <b id="amountTon">0</b> TON</div>
     <div class="row muted">Комментарий: <span id="memo">(без комментария)</span></div>
 
-    <!-- Небольшая встроенная кнопка TonConnect UI (по желанию) -->
+    <!-- мини-кнопка статуса TonConnect (Connect/Disconnect) -->
     <div class="row" id="tonconnect-button-root"></div>
 
     <div class="row"><button id="connectBtn" class="ghost">Подключить кошелёк</button></div>
@@ -47,27 +50,26 @@
 </div>
 
 <script>
-  // Готовим Telegram WebApp (если открыто внутри Telegram)
+  // 0) Telegram WebApp ok
   if (window.Telegram && Telegram.WebApp) Telegram.WebApp.ready();
 
-  // Читаем параметры из URL: ?address=...&amount=...&memo=...
+  // 1) Параметры из URL
   const qs        = new URLSearchParams(location.search);
   const toAddress = (qs.get('address') || '').trim();
-  const amountStr = (qs.get('amount')  || '').trim(); // строка в TON, напр. "0.3386775"
+  const amountStr = (qs.get('amount')  || '').trim();  // "0.3386775"
   const memo      = (qs.get('memo')    || '').trim();
 
-  // Подставляем в UI
-  document.getElementById('addr').textContent     = toAddress || '(пусто)';
-  document.getElementById('amountTon').textContent= amountStr || '0';
-  document.getElementById('memo').textContent     = memo || '(без комментария)';
+  document.getElementById('addr').textContent      = toAddress || '(пусто)';
+  document.getElementById('amountTon').textContent = amountStr || '0';
+  document.getElementById('memo').textContent      = memo || '(без комментария)';
 
-  // Динамический манифест с текущего домена (vercel.app или stars4ton.com)
+  // 2) Manifest с текущего домена
   const manifestUrl = new URL('/tonconnect-manifest.json', location.origin).toString();
 
-  // Инициализируем TonConnect UI
+  // 3) Инициализация TonConnect UI
   const tonConnectUI = new TON_CONNECT_UI.TonConnectUI({
     manifestUrl,
-    buttonRootId: 'tonconnect-button-root',   // мини-кнопка статуса (Connect/Disconnect)
+    buttonRootId: 'tonconnect-button-root'
   });
 
   const connectBtn = document.getElementById('connectBtn');
@@ -80,10 +82,26 @@
   }
 
   function toNano(tonStr) {
-    // безопасная конвертация TON -> nanotons (строка BigInt)
-    const [intPart, fracRaw = ''] = String(tonStr).split('.');
-    const frac = (fracRaw + '000000000').slice(0, 9); // до 9 знаков
-    return (BigInt(intPart || '0') * 1000000000n + BigInt(frac || '0')).toString();
+    const [ip, frRaw=''] = String(tonStr).split('.');
+    const fr = (frRaw + '000000000').slice(0, 9);
+    return (BigInt(ip || '0') * 1000000000n + BigInt(fr || '0')).toString();
+  }
+
+  // 4) Собираем payload(BOC) с комментарием через ton-core (op=0)
+  function makeCommentPayloadBase64(text) {
+    try {
+      if (!text) return undefined;
+      const core = window.toncore || window.TonCore || window.ton; // на всякий
+      const cell = core.beginCell().storeUint(0, 32).storeStringTail(text).endCell();
+      const boc  = cell.toBoc();                       // Uint8Array
+      // Uint8Array -> base64
+      let binary = '';
+      for (let i = 0; i < boc.length; i++) binary += String.fromCharCode(boc[i]);
+      return btoa(binary);
+    } catch (e) {
+      console.warn('makeCommentPayloadBase64 error:', e);
+      return undefined; // если что — просто уйдём без комментария
+    }
   }
 
   async function refreshUiByConnection() {
@@ -92,21 +110,21 @@
     payBtn.disabled = !connected || !toAddress || !amountStr;
   }
 
-  // Восстановим сессию (если кошелёк уже был подключён)
   tonConnectUI.connectionRestored.then(refreshUiByConnection);
   tonConnectUI.onStatusChange(refreshUiByConnection);
 
-  // Кнопка "Подключить кошелёк" — открываем модалку TonConnect UI
+  // 5) Подключение кошелька
   connectBtn.addEventListener('click', async () => {
     try {
-      await tonConnectUI.openModal(); // пользователь сам подтвердит Telegram Wallet
+      // откроется модалка, пользователь выберет Telegram Wallet (TON)
+      await tonConnectUI.openModal();
       setStatus('');
-    } catch (e) {
+    } catch {
       setStatus('Подключение отменено.', false);
     }
   });
 
-  // Кнопка "Оплатить"
+  // 6) Оплата
   payBtn.addEventListener('click', async () => {
     setStatus('');
     payBtn.disabled = true;
@@ -114,10 +132,7 @@
     try {
       if (!tonConnectUI.connected) {
         await tonConnectUI.openModal();
-        if (!tonConnectUI.connected) {
-          payBtn.disabled = false;
-          return;
-        }
+        if (!tonConnectUI.connected) { payBtn.disabled = false; return; }
       }
 
       if (!toAddress || !amountStr) {
@@ -126,20 +141,22 @@
         return;
       }
 
+      const msg = {
+        address: toAddress,
+        amount: toNano(amountStr)
+      };
+
+      const payloadB64 = makeCommentPayloadBase64(memo);
+      if (payloadB64) msg.payload = payloadB64; // ВАЖНО: здесь теперь BOC base64
+
       const tx = {
         validUntil: Math.floor(Date.now() / 1000) + 600,
-        messages: [{
-          address: toAddress,
-          amount: toNano(amountStr),
-          // большинство кошельков TonConnect понимают "comment" как простой текстовый мемо:
-          payload: memo ? { type: 'comment', value: memo } : undefined
-        }]
+        messages: [msg]
       };
 
       await tonConnectUI.sendTransaction(tx);
       setStatus('Запрос на оплату отправлен в кошелёк. Подтвердите транзакцию.', true);
 
-      // Если открыто внутри Telegram WebApp — мягко закрыть
       setTimeout(() => { if (Telegram?.WebApp?.close) Telegram.WebApp.close(); }, 1500);
     } catch (e) {
       setStatus('Не удалось отправить транзакцию. ' + (e?.message || ''), false);
