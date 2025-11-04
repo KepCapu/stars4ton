@@ -4,33 +4,42 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Оплата Stars — TON</title>
-  <!-- TON Connect SDK -->
-  <script src="https://unpkg.com/@tonconnect/sdk@latest/dist/tonconnect.umd.js"></script>
-  <!-- Telegram WebApp SDK -->
+  <!-- TonConnect UI (с модалкой выбора кошелька) -->
+  <script src="https://unpkg.com/@tonconnect/ui@latest/dist/tonconnect-ui.min.js"></script>
+  <!-- Telegram WebApp SDK (не обязателен, но ок) -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     html,body{margin:0;padding:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",sans-serif;background:#0b0f19;color:#fff}
-    .wrap{max-width:640px;margin:0 auto;padding:20px}
-    .card{background:#12182b;border:1px solid #1f2a44;border-radius:14px;padding:18px;box-shadow:0 8px 26px rgba(0,0,0,.35)}
-    h1{font-size:20px;margin:0 0 10px}
-    .row{margin:10px 0}
+    .wrap{max-width:740px;margin:0 auto;padding:28px}
+    .card{background:#12182b;border:1px solid #1f2a44;border-radius:16px;padding:22px;box-shadow:0 8px 26px rgba(0,0,0,.35)}
+    h1{font-size:22px;margin:0 0 12px}
+    .row{margin:12px 0}
     code{background:#0d1426;border:1px solid #24314f;border-radius:8px;padding:6px 8px;display:inline-block;word-break:break-all}
     button{width:100%;padding:14px 16px;border-radius:12px;border:0;font-weight:600;font-size:16px;cursor:pointer}
-    .primary{background:#36c; color:#fff}
+    .primary{background:#3b6df6; color:#fff}
     .ghost{background:transparent;border:1px solid #2b3a63;color:#cfd9ff}
-    .muted{opacity:.85}
+    .muted{opacity:.9}
     .ok{color:#9effb4}
     .err{color:#ff8c8c}
+    .kbd{display:inline-block;padding:.15rem .45rem;border:1px solid #2b3a63;border-radius:6px;background:#0d1426}
   </style>
 </head>
 <body>
 <div class="wrap">
   <div class="card">
     <h1>Оплата Stars через Telegram Wallet</h1>
-    <div class="row muted" id="summary"></div>
-    <div class="row">Получатель: <code id="addr"></code></div>
-    <div class="row">Сумма к оплате: <b id="amountTon"></b> TON</div>
-    <div class="row muted">Комментарий: <span id="memo"></span></div>
+
+    <div class="row muted" id="summary">
+      Выберите способ для оплаты — форма перевода откроется с заполненными полями.
+    </div>
+
+    <div class="row">Получатель: <code id="addr">(пусто)</code></div>
+    <div class="row">Сумма к оплате: <b id="amountTon">0</b> TON</div>
+    <div class="row muted">Комментарий: <span id="memo">(без комментария)</span></div>
+
+    <!-- Небольшая встроенная кнопка TonConnect UI (по желанию) -->
+    <div class="row" id="tonconnect-button-root"></div>
+
     <div class="row"><button id="connectBtn" class="ghost">Подключить кошелёк</button></div>
     <div class="row"><button id="payBtn" class="primary" disabled>Оплатить</button></div>
     <div class="row muted" id="status"></div>
@@ -38,69 +47,79 @@
 </div>
 
 <script>
+  // Готовим Telegram WebApp (если открыто внутри Telegram)
   if (window.Telegram && Telegram.WebApp) Telegram.WebApp.ready();
 
-  // Параметры приходят из бота: ?address=...&amount=...&memo=...
-  const qs = new URLSearchParams(location.search);
+  // Читаем параметры из URL: ?address=...&amount=...&memo=...
+  const qs        = new URLSearchParams(location.search);
   const toAddress = (qs.get('address') || '').trim();
-  const amountStr = (qs.get('amount') || '').trim(); // строка в TON, напр. "0.3386775"
-  const memo      = (qs.get('memo') || '').trim();
+  const amountStr = (qs.get('amount')  || '').trim(); // строка в TON, напр. "0.3386775"
+  const memo      = (qs.get('memo')    || '').trim();
 
-  document.getElementById('addr').textContent = toAddress || '(пусто)';
-  document.getElementById('amountTon').textContent = amountStr || '0';
-  document.getElementById('memo').textContent = memo || '(без комментария)';
+  // Подставляем в UI
+  document.getElementById('addr').textContent     = toAddress || '(пусто)';
+  document.getElementById('amountTon').textContent= amountStr || '0';
+  document.getElementById('memo').textContent     = memo || '(без комментария)';
 
-  // TON Connect: указываем абсолютный URL манифеста на вашем домене
-  const manifestUrl = "https://stars4ton.com/tonconnect-manifest.json";
-  const tonConnect = new TON_CONNECT.TonConnect({ manifestUrl });
+  // Динамический манифест с текущего домена (vercel.app или stars4ton.com)
+  const manifestUrl = new URL('/tonconnect-manifest.json', location.origin).toString();
+
+  // Инициализируем TonConnect UI
+  const tonConnectUI = new TON_CONNECT_UI.TonConnectUI({
+    manifestUrl,
+    buttonRootId: 'tonconnect-button-root',   // мини-кнопка статуса (Connect/Disconnect)
+  });
 
   const connectBtn = document.getElementById('connectBtn');
   const payBtn     = document.getElementById('payBtn');
   const statusEl   = document.getElementById('status');
-  const summaryEl  = document.getElementById('summary');
 
   function setStatus(text, ok) {
     statusEl.textContent = text || '';
-    statusEl.className = ok ? 'row ok' : 'row err';
+    statusEl.className = ok === undefined ? 'row muted' : (ok ? 'row ok' : 'row err');
   }
-
-  async function ensureConnected() {
-    if (tonConnect.connected) return;
-    try {
-      // просим именно Telegram Wallet (вкладка TON), чтобы не уводило в MyTon
-      await tonConnect.connect({ wallets: [{ appName: "telegram-wallet" }] });
-    } catch (e) {
-      setStatus('Подключение отклонено или не удалось.', false);
-      throw e;
-    }
-  }
-
-  connectBtn.addEventListener('click', async () => {
-    connectBtn.disabled = true;
-    setStatus('');
-    try {
-      await ensureConnected();
-      connectBtn.textContent = 'Кошелёк подключён';
-      connectBtn.className = 'ghost';
-      payBtn.disabled = false;
-      setStatus('Кошелёк подключён. Можно оплачивать.', true);
-    } catch {
-      connectBtn.disabled = false;
-    }
-  });
 
   function toNano(tonStr) {
-    const [intPart, fracRaw = ''] = tonStr.split('.');
+    // безопасная конвертация TON -> nanotons (строка BigInt)
+    const [intPart, fracRaw = ''] = String(tonStr).split('.');
     const frac = (fracRaw + '000000000').slice(0, 9); // до 9 знаков
     return (BigInt(intPart || '0') * 1000000000n + BigInt(frac || '0')).toString();
   }
 
+  async function refreshUiByConnection() {
+    const connected = tonConnectUI.connected;
+    connectBtn.textContent = connected ? 'Кошелёк подключён' : 'Подключить кошелёк';
+    payBtn.disabled = !connected || !toAddress || !amountStr;
+  }
+
+  // Восстановим сессию (если кошелёк уже был подключён)
+  tonConnectUI.connectionRestored.then(refreshUiByConnection);
+  tonConnectUI.onStatusChange(refreshUiByConnection);
+
+  // Кнопка "Подключить кошелёк" — открываем модалку TonConnect UI
+  connectBtn.addEventListener('click', async () => {
+    try {
+      await tonConnectUI.openModal(); // пользователь сам подтвердит Telegram Wallet
+      setStatus('');
+    } catch (e) {
+      setStatus('Подключение отменено.', false);
+    }
+  });
+
+  // Кнопка "Оплатить"
   payBtn.addEventListener('click', async () => {
     setStatus('');
     payBtn.disabled = true;
 
     try {
-      await ensureConnected();
+      if (!tonConnectUI.connected) {
+        await tonConnectUI.openModal();
+        if (!tonConnectUI.connected) {
+          payBtn.disabled = false;
+          return;
+        }
+      }
+
       if (!toAddress || !amountStr) {
         setStatus('Некорректные параметры платежа.', false);
         payBtn.disabled = false;
@@ -112,21 +131,21 @@
         messages: [{
           address: toAddress,
           amount: toNano(amountStr),
+          // большинство кошельков TonConnect понимают "comment" как простой текстовый мемо:
           payload: memo ? { type: 'comment', value: memo } : undefined
         }]
       };
 
-      await tonConnect.sendTransaction(tx);
-      setStatus('Запрос на оплату отправлен в кошелёк. Подтвердите в Telegram Wallet (вкладка TON).', true);
+      await tonConnectUI.sendTransaction(tx);
+      setStatus('Запрос на оплату отправлен в кошелёк. Подтвердите транзакцию.', true);
 
+      // Если открыто внутри Telegram WebApp — мягко закрыть
       setTimeout(() => { if (Telegram?.WebApp?.close) Telegram.WebApp.close(); }, 1500);
     } catch (e) {
       setStatus('Не удалось отправить транзакцию. ' + (e?.message || ''), false);
       payBtn.disabled = false;
     }
   });
-
-  summaryEl.textContent = 'Выберите способ для оплаты — форма перевода откроется с заполненными полями.';
 </script>
 </body>
 </html>
